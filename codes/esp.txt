@@ -1,0 +1,201 @@
+// ========== ESP8266 NODEMCU CODE (LCD + BLYNK NODE) ==========
+#define BLYNK_TEMPLATE_ID "TMPL6i29RxjWg"
+#define BLYNK_TEMPLATE_NAME "Smart Baby Monitor"
+#define BLYNK_AUTH_TOKEN "G2NDNT2cRvP2AI9CBtmzMO7PJT4smBDZ"
+
+
+#include <ESP8266WiFi.h>
+#include <BlynkSimpleEsp8266.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+char auth[] = BLYNK_AUTH_TOKEN;
+char ssid[] = "SLT _FIBER";
+char pass[] = "hsbnb@ts";
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// Variables for display and state
+float temperature = 0;
+float humidity = 0;
+int wetness = 0;
+int soundLevel = 0;
+int motion = 0;
+int motorSpeed = 180;
+bool fanIsOn = false;
+bool buzzerEnabled = true;
+
+// Controls
+bool fanAutoMode = true;
+int tempThreshold = 28;
+bool autoRocking = true;
+
+// Display rotation
+unsigned long lastDisplayTime = 0;
+int screenPage = 0;
+bool cryDetected = false;
+bool wetAlert = false;
+bool systemStarted = false;
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.begin(ssid, pass);
+  while (WiFi.status() != WL_CONNECTED) delay(500);
+  Blynk.begin(auth, ssid, pass);
+
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print("Loading...");
+  lcd.setCursor(0, 1);
+  lcd.print("Please wait...");
+  delay(5000);
+
+  lcd.clear();
+  lcd.print("Waiting for");
+  lcd.setCursor(0, 1);
+  lcd.print("Arduino serial");
+
+  // Wait for Arduino to send first valid packet
+  unsigned long waitStart = millis();
+  while (!systemStarted && millis() - waitStart < 15000) {
+    handleSerialData();
+  }
+
+  lcd.clear();
+  lcd.print("System Ready");
+  delay(1500);
+  lcd.clear();
+
+  Blynk.virtualWrite(V1, motorSpeed);
+  Blynk.virtualWrite(V2, fanAutoMode);
+  Blynk.virtualWrite(V3, buzzerEnabled);
+  Blynk.virtualWrite(V7, tempThreshold);
+  Blynk.virtualWrite(V8, autoRocking);
+}
+
+void loop() {
+  Blynk.run();
+  handleSerialData();
+  if (systemStarted) updateLCD();
+}
+
+void handleSerialData() {
+  static String buffer = "";
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '$') buffer = "";
+    else if (c == '#') {
+      parseData(buffer);
+      systemStarted = true;
+      buffer = "";
+    } else buffer += c;
+  }
+}
+
+void parseData(String data) {
+  int idx = 0;
+  float vals[8];
+  int last = 0;
+  for (int i = 0; i < data.length(); i++) {
+    if (data[i] == '|') {
+      vals[idx++] = data.substring(last, i).toFloat();
+      last = i + 1;
+    }
+  }
+  vals[idx] = data.substring(last).toFloat();
+
+  temperature = vals[0];
+  humidity = vals[1];
+  wetness = vals[2];
+  soundLevel = vals[3];
+  motion = vals[4];
+  motorSpeed = vals[5];
+  fanIsOn = vals[6];
+  buzzerEnabled = vals[7];
+
+  // Send data to Blynk
+  Blynk.virtualWrite(V4, temperature);
+  Blynk.virtualWrite(V5, humidity);
+  Blynk.virtualWrite(V6, wetness);
+  Blynk.virtualWrite(V11, soundLevel);
+  Blynk.virtualWrite(V12, motion);
+  Blynk.virtualWrite(V13, motorSpeed);
+  Blynk.virtualWrite(V14, fanIsOn);
+  Blynk.virtualWrite(V15, buzzerEnabled);
+
+  // Alert detection
+  cryDetected = (autoRocking && motion == 1 && soundLevel > 65);
+  wetAlert = (wetness >= 75);
+
+  if (wetAlert && buzzerEnabled) {
+    Blynk.logEvent("wet_alert", "Diaper might be wet!");
+  }
+}
+
+// === BLYNK HANDLERS ===
+BLYNK_WRITE(V1) {
+  motorSpeed = param.asInt();
+  Serial.println("MOTOR:" + String(motorSpeed));
+}
+
+BLYNK_WRITE(V2) {
+  fanAutoMode = param.asInt();
+  Serial.println("FAN:" + String(fanAutoMode));
+}
+
+BLYNK_WRITE(V3) {
+  buzzerEnabled = param.asInt();
+  Serial.println("BUZZER:" + String(buzzerEnabled));
+}
+
+BLYNK_WRITE(V7) {
+  tempThreshold = param.asInt();
+  Serial.println("TEMP_THRESH:" + String(tempThreshold));
+}
+
+BLYNK_WRITE(V8) {
+  autoRocking = param.asInt();
+  Serial.println("AUTO_ROCK:" + String(autoRocking));
+}
+
+void updateLCD() {
+  if (millis() - lastDisplayTime < 2500) return;
+  lastDisplayTime = millis();
+  lcd.clear();
+
+  switch (screenPage) {
+    case 0:
+      lcd.print("Temp: " + String(temperature,1) + "C");
+      lcd.setCursor(0,1);
+      lcd.print("Hum: " + String(humidity,1) + "%");
+      break;
+    case 1:
+      lcd.print("Wet: " + String(wetness) + "%");
+      lcd.setCursor(0,1);
+      lcd.print("Sound: " + String(soundLevel) + "%");
+      break;
+    case 2:
+      lcd.print("Motor: " + String(motorSpeed));
+      lcd.setCursor(0,1);
+      if (!fanAutoMode) lcd.print("Fan: OFF");
+      else lcd.print("Fan: " + String(fanIsOn ? "AUTO ON" : "AUTO OFF"));
+      break;
+    case 3:
+      if (cryDetected) {
+        lcd.print("Cry Detected!");
+        lcd.setCursor(0,1);
+        lcd.print("Cradle Rocking");
+      } else if (wetAlert) {
+        lcd.print("Wet Alert!");
+        lcd.setCursor(0,1);
+        lcd.print("Check Diaper");
+      } else {
+        lcd.print("Status Normal");
+        lcd.setCursor(0,1);
+        lcd.print("Baby is Calm");
+      }
+      break;
+  }
+  screenPage = (screenPage + 1) % 4;
+}
